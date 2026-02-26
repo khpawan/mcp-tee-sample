@@ -28,6 +28,7 @@ COPY src/server.py .
 RUN useradd --create-home --shell /bin/bash mcpuser
 USER mcpuser
 
-# The MCP server runs on stdio transport by default.
-# For SSE transport, override with: CMD ["python", "server.py", "--transport", "sse"]
+# The MCP server runs on streamable-http transport (port 8080) by default.
+# For local stdio dev: set MCP_TRANSPORT=stdio
+EXPOSE 8080
 ENTRYPOINT ["python", "server.py"]
