@@ -257,4 +257,8 @@ if __name__ == "__main__":
         "TEE environment: /dev/sev-guest=%s",
         os.path.exists("/dev/sev-guest"),
     )
-    mcp.run(transport="stdio")
+    transport = os.environ.get("MCP_TRANSPORT", "streamable-http")
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        mcp.run(transport="streamable-http", host="0.0.0.0", port=8080)
