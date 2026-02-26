@@ -17,6 +17,8 @@ import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
+DEFAULT_SERVER_URL = "http://localhost:8080/mcp"
+
 
 async def run(server_url: str) -> int:
     """Connect to the MCP server, call attestation_status, print report."""
@@ -30,8 +32,14 @@ async def run(server_url: str) -> int:
             result = await session.call_tool("attestation_status", arguments={})
 
     # Parse the JSON payload from the first content block
-    raw = result.content[0].text
-    data = json.loads(raw)
+    if not result.content or not hasattr(result.content[0], "text"):
+        print("ERROR: Unexpected response format from attestation_status tool.")
+        return 1
+    try:
+        data = json.loads(result.content[0].text)
+    except json.JSONDecodeError as e:
+        print(f"ERROR: Could not parse attestation_status response: {e}")
+        return 1
 
     server_name = data.get("server", "unknown")
     version = data.get("version", "unknown")
@@ -71,8 +79,7 @@ async def run(server_url: str) -> int:
 
 
 def main() -> None:
-    default_url = "http://localhost:8080/mcp"
-    server_url = sys.argv[1] if len(sys.argv) > 1 else default_url
+    server_url = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_SERVER_URL
     _CONNECT_ERRORS = (ConnectionRefusedError, OSError, httpx.ConnectError)
     try:
         exit_code = asyncio.run(run(server_url))
