@@ -261,4 +261,6 @@ if __name__ == "__main__":
     if transport == "stdio":
         mcp.run(transport="stdio")
     else:
-        mcp.run(transport="streamable-http", host="0.0.0.0", port=8080)
+        mcp.settings.host = "0.0.0.0"
+        mcp.settings.port = 8080
+        mcp.run(transport="streamable-http")
