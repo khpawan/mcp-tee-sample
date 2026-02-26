@@ -13,6 +13,7 @@ import asyncio
 import json
 import sys
 
+import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
@@ -72,7 +73,25 @@ async def run(server_url: str) -> int:
 def main() -> None:
     default_url = "http://localhost:8080/mcp"
     server_url = sys.argv[1] if len(sys.argv) > 1 else default_url
-    exit_code = asyncio.run(run(server_url))
+    _CONNECT_ERRORS = (ConnectionRefusedError, OSError, httpx.ConnectError)
+    try:
+        exit_code = asyncio.run(run(server_url))
+    except _CONNECT_ERRORS as e:
+        print(f"ERROR: could not connect to {server_url} — {e}")
+        exit_code = 1
+    except BaseException as e:
+        # The MCP library wraps connection errors in an ExceptionGroup; unwrap it.
+        causes = (
+            e.exceptions
+            if isinstance(e, BaseExceptionGroup)
+            else [e]
+        )
+        conn_causes = [c for c in causes if isinstance(c, _CONNECT_ERRORS)]
+        if conn_causes:
+            print(f"ERROR: could not connect to {server_url} — {conn_causes[0]}")
+            exit_code = 1
+        else:
+            raise
     sys.exit(exit_code)
 
 
