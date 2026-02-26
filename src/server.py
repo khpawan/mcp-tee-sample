@@ -91,17 +91,24 @@ async def github_search_issues(
     q = f"{query} repo:{repo}" if repo else query
 
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(
-            "https://api.github.com/search/issues",
-            params={"q": q, "per_page": max_results, "sort": "updated"},
-            headers={
-                "Authorization": f"Bearer {GITHUB_TOKEN}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            resp = await client.get(
+                "https://api.github.com/search/issues",
+                params={"q": q, "per_page": max_results, "sort": "updated"},
+                headers={
+                    "Authorization": f"Bearer {GITHUB_TOKEN}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.error("GitHub API request failed: %s", e)
+            return {"error": f"GitHub API error: HTTP {e.response.status_code}"}
+        except httpx.RequestError as e:
+            logger.error("GitHub API request error: %s", e)
+            return {"error": f"GitHub API request failed: {type(e).__name__}: {e}"}
 
     issues = [
         {
@@ -152,14 +159,21 @@ async def query_database(
         if keyword in sql_upper:
             return {"error": f"Query contains forbidden keyword: {keyword}"}
 
+    # Reject multi-statement queries (semicolons followed by more SQL)
+    stripped = sql.strip().rstrip(";")
+    if ";" in stripped:
+        return {"error": "Multi-statement queries are not permitted"}
+
     max_rows = min(max(1, max_rows), 1000)
 
     try:
         import asyncpg
 
-        conn = await asyncpg.connect(DB_CONNECTION_STRING)
+        conn = await asyncpg.connect(DB_CONNECTION_STRING, timeout=10)
         try:
-            rows = await conn.fetch(sql)
+            # Use a read-only transaction to enforce SELECT-only at the database level
+            async with conn.transaction(readonly=True):
+                rows = await conn.fetch(sql)
             result = [dict(row) for row in rows[:max_rows]]
             logger.info("query_database: sql=%r, rows=%d", sql[:80], len(result))
             return {
@@ -211,8 +225,15 @@ async def send_notification(
     }
 
     async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(WEBHOOK_URL, json=payload)
-        resp.raise_for_status()
+        try:
+            resp = await client.post(WEBHOOK_URL, json=payload)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            logger.error("Webhook request failed: %s", e)
+            return {"error": f"Webhook error: HTTP {e.response.status_code}"}
+        except httpx.RequestError as e:
+            logger.error("Webhook request error: %s", e)
+            return {"error": f"Webhook request failed: {type(e).__name__}: {e}"}
 
     logger.info(
         "send_notification: channel=%s, urgency=%s, length=%d",

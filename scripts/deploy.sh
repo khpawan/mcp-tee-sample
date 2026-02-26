@@ -16,6 +16,12 @@
 # ─────────────────────────────────────────────────────────────────
 set -euo pipefail
 
+# ── Pre-flight: Ensure Azure CLI is authenticated ────────────────
+if ! az account show &>/dev/null; then
+  echo "ERROR: Not logged into Azure CLI. Run 'az login' first."
+  exit 1
+fi
+
 # ── Parse Arguments ──────────────────────────────────────────────
 ACR_NAME=""
 RESOURCE_GROUP=""
@@ -75,11 +81,14 @@ echo "✓ CCE policy generated (${#CCE_POLICY} chars, base64-encoded)"
 POLICY_HASH=$(echo -n "${CCE_POLICY}" | base64 -d | sha256sum | cut -d' ' -f1)
 echo "✓ Policy hash: ${POLICY_HASH}"
 echo ""
-echo "  ┌─────────────────────────────────────────────────────┐"
-echo "  │ UPDATE infra/key-release-policy.json with this hash │"
-echo "  │ Replace <REPLACE_WITH_CCE_POLICY_HASH> with:        │"
-echo "  │ ${POLICY_HASH}  │"
-echo "  └─────────────────────────────────────────────────────┘"
+# Automatically update key-release-policy.json with the computed hash
+POLICY_FILE="infra/key-release-policy.json"
+if [[ -f "${POLICY_FILE}" ]]; then
+  sed -i "s/<REPLACE_WITH_CCE_POLICY_HASH>/${POLICY_HASH}/g" "${POLICY_FILE}"
+  echo "✓ Updated ${POLICY_FILE} with policy hash: ${POLICY_HASH}"
+else
+  echo "⚠ ${POLICY_FILE} not found — update it manually with hash: ${POLICY_HASH}"
+fi
 echo ""
 
 # ── Step 3: Deploy Infrastructure ───────────────────────────────
