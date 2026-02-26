@@ -42,7 +42,7 @@ Run the MCP server inside a Confidential Container on ACI. The AMD SEV-SNP hardw
 └─────────────────────────────────────────────────────┘
                         │
                         ▼
-              Azure Key Vault (mHSM)
+              Azure Key Vault Premium (SKR)
               Key-release policy binds
               secrets to CCE policy hash
 ```
@@ -53,7 +53,7 @@ Run the MCP server inside a Confidential Container on ACI. The AMD SEV-SNP hardw
 2. **Attestation sidecar** generates a hardware quote (measurement of running code)
 3. **Azure MAA** validates the quote against AMD root certificates
 4. **Signed JWT** returned with code measurement + platform claims
-5. **Key Vault mHSM** evaluates the key-release policy — checks the JWT measurement matches the expected CCE policy hash
+5. **Key Vault Premium (SKR)** evaluates the key-release policy — checks the JWT measurement matches the expected CCE policy hash
 6. **Secrets released** only to verified code — host compromise yields cryptographically nothing
 
 ## Project Structure
@@ -64,6 +64,7 @@ mcp-tee-sample/
 ├── Dockerfile                         # Container image for the MCP server
 ├── src/
 │   ├── server.py                      # MCP server with 3 tools + attestation status
+│   ├── agent.py                       # Bare MCP client — verifies attestation remotely
 │   └── requirements.txt               # Python dependencies
 ├── infra/
 │   ├── main.bicep                     # ACI Confidential + AKV + Managed Identity
@@ -155,13 +156,26 @@ cd src && python server.py
 
 The `attestation_status` tool will report `running_in_tee: false` when not in a confidential container.
 
+### Verify attestation remotely
+
+```bash
+# In one terminal — start the server
+cd src && python server.py
+
+# In another terminal — run the agent
+python src/agent.py http://localhost:8080/mcp
+
+# Against a deployed ACI container:
+python src/agent.py http://<aci-fqdn>:8080/mcp
+```
+
 ## Security Model
 
 | Layer | Control | What it protects against |
 |-------|---------|------------------------|
 | Hardware | AMD SEV-SNP memory encryption | Privileged host access, memory dumps |
 | Attestation | Azure MAA + CCE policy | Supply chain attacks, image tampering |
-| Key Management | AKV mHSM key-release policy | Unauthorized secret access |
+| Key Management | Key Vault Premium SKR policy | Unauthorized secret access |
 | Application | Read-only SQL, input validation | Prompt injection, tool misuse |
 | Capability Model | Default-deny, confirmation gates | Unauthorized write actions |
 
