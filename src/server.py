@@ -10,8 +10,8 @@ Tools:
   2. query_database         — Run read-only SQL queries (needs DB_CONNECTION_STRING)
   3. send_notification      — Post to a webhook/Slack (needs WEBHOOK_URL)
 
-All secrets are fetched at startup via Azure Key Vault mHSM with a
-key-release policy bound to this container's attestation measurement.
+All secrets are fetched at startup via Azure Key Vault Premium (SKR) with a
+Secure Key Release policy bound to this container's attestation measurement.
 Secrets never leave the enclave, are never written to disk, and are
 never visible to the host OS — even with root access.
 """

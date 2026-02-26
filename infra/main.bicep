@@ -55,7 +55,7 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   properties: {
     sku: {
       family: 'A'
-      name: 'premium' // Required for mHSM-backed keys and key-release policies
+      name: 'premium' // Required for HSM-backed keys and Secure Key Release (SKR) policies
     }
     tenantId: subscription().tenantId
     enableRbacAuthorization: true
