@@ -258,6 +258,10 @@ if __name__ == "__main__":
         os.path.exists("/dev/sev-guest"),
     )
     transport = os.environ.get("MCP_TRANSPORT", "streamable-http")
+    if transport not in {"stdio", "streamable-http"}:
+        logger.warning("Unknown MCP_TRANSPORT=%r, falling back to streamable-http", transport)
+        transport = "streamable-http"
+    logger.info("Transport: %s", transport)
     if transport == "stdio":
         mcp.run(transport="stdio")
     else:
