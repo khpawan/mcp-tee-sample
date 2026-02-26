@@ -1,0 +1,32 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+venv/
+.env
+*.env
+
+# Node
+node_modules/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Secrets & keys
+*.pem
+*.key
+*.p12
+*.pfx

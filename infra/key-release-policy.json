@@ -1,0 +1,23 @@
+{
+  "version": "1.0.0",
+  "anyOf": [
+    {
+      "authority": "https://sharedeus.eus.attest.azure.net",
+      "allOf": [
+        {
+          "claim": "x-ms-sevsnpvm-is-debuggable",
+          "equals": "false"
+        },
+        {
+          "claim": "x-ms-compliance-status",
+          "equals": "azure-compliant-cvm"
+        },
+        {
+          "claim": "x-ms-sevsnpvm-hostdata",
+          "comment": "This value must match the SHA-256 hash of your CCE policy. Generate it with: az confcom acipolicy gen --image <image> | sha256sum",
+          "equals": "<REPLACE_WITH_CCE_POLICY_HASH>"
+        }
+      ]
+    }
+  ]
+}
