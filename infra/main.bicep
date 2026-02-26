@@ -168,10 +168,26 @@ resource containerGroup 'Microsoft.ContainerInstance/containerGroups@2023-05-01'
               value: keyVault.properties.vaultUri
             }
           ]
-          ports: []
+          ports: [
+            {
+              port: 8080
+              protocol: 'TCP'
+            }
+          ]
         }
       }
     ]
+
+    // ─── Network: expose the MCP server port ──────────────────
+    ipAddress: {
+      type: 'Public'
+      ports: [
+        {
+          port: 8080
+          protocol: 'TCP'
+        }
+      ]
+    }
 
     // ─── Image Registry Credentials ───────────────────────────
     imageRegistryCredentials: [
@@ -189,3 +205,4 @@ output containerGroupName string = containerGroup.name
 output keyVaultName string = keyVault.name
 output keyVaultUri string = keyVault.properties.vaultUri
 output managedIdentityClientId string = managedIdentity.properties.clientId
+output serverFqdn string = containerGroup.properties.ipAddress.fqdn
