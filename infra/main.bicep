@@ -36,6 +36,13 @@ param location string = resourceGroup().location
 @description('Name prefix for all resources')
 param namePrefix string = 'mcp-tee'
 
+@description('Set to false to skip RBAC role assignment (useful when lacking Owner/UAA permissions)')
+param deployRbac bool = true
+
+@description('ACR admin password (used when managed identity lacks AcrPull role)')
+@secure()
+param acrPassword string = ''
+
 // ── Variables ───────────────────────────────────────────────────
 var containerGroupName = '${namePrefix}-server'
 var keyVaultName = '${namePrefix}-kv-${uniqueString(resourceGroup().id)}'
@@ -102,7 +109,7 @@ resource webhookUrlSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
 
 // ── RBAC: Grant the managed identity access to Key Vault secrets ─
 // Role: Key Vault Secrets User (4633458b-17de-408a-b874-0445c86b69e6)
-resource kvRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource kvRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployRbac) {
   name: guid(keyVault.id, managedIdentity.id, '4633458b-17de-408a-b874-0445c86b69e6')
   scope: keyVault
   properties: {
@@ -181,6 +188,7 @@ resource containerGroup 'Microsoft.ContainerInstance/containerGroups@2023-05-01'
     // ─── Network: expose the MCP server port ──────────────────
     ipAddress: {
       type: 'Public'
+      dnsNameLabel: containerGroupName
       ports: [
         {
           port: 8080
@@ -191,7 +199,11 @@ resource containerGroup 'Microsoft.ContainerInstance/containerGroups@2023-05-01'
 
     // ─── Image Registry Credentials ───────────────────────────
     imageRegistryCredentials: [
-      {
+      acrPassword != '' ? {
+        server: '${acrName}.azurecr.io'
+        username: acrName
+        password: acrPassword
+      } : {
         server: '${acrName}.azurecr.io'
         identity: managedIdentity.id
       }

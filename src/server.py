@@ -25,6 +25,7 @@ from typing import Any
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 # ── Logging ─────────────────────────────────────────────────────
 logging.basicConfig(
@@ -55,14 +56,21 @@ def _check_secrets() -> dict[str, bool]:
 
 
 # ── MCP Server ──────────────────────────────────────────────────
+# Allow connections from any host (the server runs behind ACI's public IP/FQDN)
+_allowed_hosts = os.environ.get("MCP_ALLOWED_HOSTS", "*").split(",")
+_transport_security = TransportSecuritySettings(
+    enable_dns_rebinding_protection=(_allowed_hosts != ["*"]),
+    allowed_hosts=_allowed_hosts if _allowed_hosts != ["*"] else [],
+)
+
 mcp = FastMCP(
     "mcp-tee-server",
-    version="1.0.0",
-    description=(
+    instructions=(
         "A reference MCP server running inside an Azure Confidential "
         "Container (ACI, AMD SEV-SNP). Demonstrates TEE-protected "
         "credential management with remote attestation."
     ),
+    transport_security=_transport_security,
 )
 
 
