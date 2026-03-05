@@ -18,6 +18,7 @@ never visible to the host OS — even with root access.
 
 import os
 import json
+import base64
 import logging
 import asyncio
 from datetime import datetime, timezone
@@ -26,6 +27,10 @@ from typing import Any
 import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from cryptography.hazmat.primitives.asymmetric import padding as rsa_padding
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateNumbers, RSAPublicNumbers
+from cryptography.hazmat.backends import default_backend
 
 # ── Logging ─────────────────────────────────────────────────────
 logging.basicConfig(
@@ -34,23 +39,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger("mcp-tee-server")
 
-# ── Secret Loading ──────────────────────────────────────────────
-# In production, secrets are fetched from Azure Key Vault via the SKR
-# (Secure Key Release) sidecar. The sidecar performs hardware attestation
-# (AMD SEV-SNP → MAA token) and releases keys only when the key-release
-# policy is satisfied.
+# ── Secret Loading (Envelope Encryption via SKR) ────────────────
+# In production, a single RSA-HSM key (the "envelope key") is created in
+# Azure Key Vault Premium with a Secure Key Release (SKR) policy.
+# Secrets are RSA-OAEP encrypted with the public key at provisioning
+# time and passed to the container as ENC_* environment variables.
 #
-# For local development, set env vars directly (never commit them).
+# At runtime the SKR sidecar performs hardware attestation (AMD SEV-SNP
+# → MAA token) and releases the RSA private key. The server then
+# decrypts the ENC_* env vars in memory — secrets never touch disk.
+#
+# For local development, set plain env vars directly (never commit them).
 
 SKR_ENDPOINT = os.environ.get("SKR_ENDPOINT", "http://localhost:9000")
 MAA_ENDPOINT = os.environ.get("MAA_ENDPOINT", "sharedeus.eus.attest.azure.net")
 AKV_ENDPOINT = os.environ.get("AKV_ENDPOINT", "")
+ENVELOPE_KEY_NAME = os.environ.get("ENVELOPE_KEY_NAME", "mcp-envelope-key")
 
-# Secret names as they appear in Key Vault (key IDs for SKR)
-_SECRET_KEY_MAP = {
-    "GITHUB_TOKEN": "github-token",
-    "DB_CONNECTION_STRING": "db-connection-string",
-    "WEBHOOK_URL": "webhook-url",
+# Map: secret name → encrypted env var holding the RSA-OAEP ciphertext
+_ENCRYPTED_ENV_MAP = {
+    "GITHUB_TOKEN": "ENC_GITHUB_TOKEN",
+    "DB_CONNECTION_STRING": "ENC_DB_CONNECTION_STRING",
+    "WEBHOOK_URL": "ENC_WEBHOOK_URL",
 }
 
 GITHUB_TOKEN = ""
@@ -59,11 +69,52 @@ WEBHOOK_URL = ""
 _secrets_source: dict[str, str] = {}  # Tracks where each secret came from
 
 
-async def _fetch_secret_from_skr(kid: str) -> str | None:
-    """Fetch a secret from the SKR sidecar via hardware attestation.
+def _base64url_decode(data: str) -> bytes:
+    """Decode a base64url string (used in JWK format)."""
+    rem = len(data) % 4
+    if rem:
+        data += "=" * (4 - rem)
+    return base64.urlsafe_b64decode(data)
+
+
+def _jwk_to_private_key(jwk: dict):
+    """Convert a JWK RSA private key dict to a cryptography RSAPrivateKey."""
+    pub = RSAPublicNumbers(
+        e=int.from_bytes(_base64url_decode(jwk["e"]), "big"),
+        n=int.from_bytes(_base64url_decode(jwk["n"]), "big"),
+    )
+    priv = RSAPrivateNumbers(
+        p=int.from_bytes(_base64url_decode(jwk["p"]), "big"),
+        q=int.from_bytes(_base64url_decode(jwk["q"]), "big"),
+        d=int.from_bytes(_base64url_decode(jwk["d"]), "big"),
+        dmp1=int.from_bytes(_base64url_decode(jwk["dp"]), "big"),
+        dmq1=int.from_bytes(_base64url_decode(jwk["dq"]), "big"),
+        iqmp=int.from_bytes(_base64url_decode(jwk["qi"]), "big"),
+        public_numbers=pub,
+    )
+    return priv.private_key(default_backend())
+
+
+def _decrypt_secret(private_key, ciphertext_b64: str) -> str:
+    """RSA-OAEP decrypt a base64-encoded ciphertext and return the plaintext string."""
+    ciphertext = base64.b64decode(ciphertext_b64)
+    plaintext = private_key.decrypt(
+        ciphertext,
+        rsa_padding.OAEP(
+            mgf=rsa_padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None,
+        ),
+    )
+    return plaintext.decode("utf-8")
+
+
+async def _fetch_envelope_key() -> dict | None:
+    """Fetch the RSA envelope private key from the SKR sidecar.
 
     The sidecar obtains an attestation report from /dev/sev-guest, sends it
     to MAA, and uses the resulting token to release the key from AKV.
+    Returns the JWK dict on success, None on failure.
     """
     if not AKV_ENDPOINT:
         return None
@@ -74,34 +125,62 @@ async def _fetch_secret_from_skr(kid: str) -> str | None:
                 json={
                     "maa_endpoint": MAA_ENDPOINT,
                     "akv_endpoint": AKV_ENDPOINT,
-                    "kid": kid,
+                    "kid": ENVELOPE_KEY_NAME,
                 },
             )
             resp.raise_for_status()
             data = resp.json()
-            return data.get("key", "")
+            key = data.get("key")
+            if isinstance(key, str):
+                key = json.loads(key)
+            return key
     except Exception as e:
-        logger.warning("SKR fetch failed for %s: %s", kid, e)
+        logger.warning("SKR envelope key fetch failed: %s", e)
         return None
 
 
 async def _load_secrets() -> None:
-    """Load secrets from SKR sidecar, falling back to environment variables."""
+    """Load secrets via envelope encryption (SKR) or plain env vars (local dev).
+
+    Production path:
+      1. SKR sidecar releases the RSA private key (attested by MAA)
+      2. Decrypt each ENC_* env var with RSA-OAEP
+    Local dev path:
+      Fall back to plain GITHUB_TOKEN / DB_CONNECTION_STRING / WEBHOOK_URL
+    """
     global GITHUB_TOKEN, DB_CONNECTION_STRING, WEBHOOK_URL
 
-    secrets = {}
-    for env_name, kid in _SECRET_KEY_MAP.items():
-        # Try SKR sidecar first (production path)
-        value = await _fetch_secret_from_skr(kid)
-        if value:
-            secrets[env_name] = value
-            _secrets_source[env_name] = "skr"
-            logger.info("Loaded %s via SKR sidecar", env_name)
-        else:
-            # Fall back to environment variable (local dev path)
+    secrets: dict[str, str] = {}
+
+    # Try SKR envelope decryption first (production path)
+    envelope_jwk = await _fetch_envelope_key()
+    if envelope_jwk:
+        try:
+            private_key = _jwk_to_private_key(envelope_jwk)
+            logger.info("Envelope key released via SKR — decrypting secrets")
+
+            for env_name, enc_env_name in _ENCRYPTED_ENV_MAP.items():
+                enc_value = os.environ.get(enc_env_name, "")
+                if enc_value:
+                    try:
+                        secrets[env_name] = _decrypt_secret(private_key, enc_value)
+                        _secrets_source[env_name] = "skr+envelope"
+                        logger.info("Decrypted %s via envelope encryption", env_name)
+                    except Exception as e:
+                        logger.warning("Failed to decrypt %s: %s", env_name, e)
+                        _secrets_source[env_name] = "decrypt_failed"
+                else:
+                    _secrets_source[env_name] = "none (no ciphertext)"
+        except Exception as e:
+            logger.error("Failed to construct RSA key from JWK: %s", e)
+
+    # Fall back to plain env vars for any secrets not yet loaded
+    for env_name in _ENCRYPTED_ENV_MAP:
+        if env_name not in secrets:
             value = os.environ.get(env_name, "")
             secrets[env_name] = value
-            _secrets_source[env_name] = "env" if value else "none"
+            if env_name not in _secrets_source:
+                _secrets_source[env_name] = "env" if value else "none"
             if value:
                 logger.info("Loaded %s from environment variable", env_name)
 

@@ -46,6 +46,21 @@ param acrPassword string = ''
 @description('MAA (Microsoft Azure Attestation) endpoint for the SKR sidecar')
 param maaEndpoint string = 'sharedeus.eus.attest.azure.net'
 
+@description('Name of the RSA-HSM envelope key in Key Vault (used by SKR to decrypt secrets)')
+param envelopeKeyName string = 'mcp-envelope-key'
+
+@description('RSA-encrypted GitHub token (base64). Encrypt with: python scripts/encrypt_secret.py')
+@secure()
+param encGithubToken string = ''
+
+@description('RSA-encrypted database connection string (base64)')
+@secure()
+param encDbConnectionString string = ''
+
+@description('RSA-encrypted webhook URL (base64)')
+@secure()
+param encWebhookUrl string = ''
+
 // ── Variables ───────────────────────────────────────────────────
 var containerGroupName = '${namePrefix}-server'
 var keyVaultName = '${namePrefix}-kv-${uniqueString(resourceGroup().id)}'
@@ -80,12 +95,15 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
 }
 
 // ── Key Vault Keys ───────────────────────────────────────────
-// Secrets are stored as exportable Key Vault keys with a release policy.
-// The SKR sidecar performs hardware attestation and calls AKV to release
-// them at runtime. Keys must be imported AFTER deployment using:
-//   az keyvault key import --vault-name <kv> --name <key-name> \
-//     --kty oct-HSM --ops export --exportable true \
-//     --policy infra/key-release-policy.json --value <base64-secret>
+// A single RSA-HSM key (the "envelope key") is used for envelope encryption.
+// Secrets are encrypted with its public key at provisioning time and passed
+// as ENC_* env vars. At runtime, the SKR sidecar releases the private key
+// (after hardware attestation) and the server decrypts them in memory.
+//
+// Create the key AFTER deployment:
+//   az keyvault key create --vault-name <kv> --name mcp-envelope-key \
+//     --kty RSA-HSM --size 4096 --exportable true \
+//     --policy @infra/key-release-policy.json
 
 // ── RBAC: Grant the managed identity access to Key Vault key release ─
 // Role: Key Vault Crypto Service Release User (08bbd89a-735e-4713-a852-15bf7196a6c7)
@@ -146,6 +164,22 @@ resource containerGroup 'Microsoft.ContainerInstance/containerGroups@2023-05-01'
             {
               name: 'AKV_ENDPOINT'
               value: keyVault.properties.vaultUri
+            }
+            {
+              name: 'ENVELOPE_KEY_NAME'
+              value: envelopeKeyName
+            }
+            {
+              name: 'ENC_GITHUB_TOKEN'
+              secureValue: encGithubToken
+            }
+            {
+              name: 'ENC_DB_CONNECTION_STRING'
+              secureValue: encDbConnectionString
+            }
+            {
+              name: 'ENC_WEBHOOK_URL'
+              secureValue: encWebhookUrl
             }
           ]
           ports: [
