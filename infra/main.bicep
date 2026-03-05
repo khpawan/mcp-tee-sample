@@ -36,8 +36,9 @@ param location string = resourceGroup().location
 @description('Name prefix for all resources')
 param namePrefix string = 'mcp-tee'
 
-@description('Set to false to skip RBAC role assignment (useful when lacking Owner/UAA permissions)')
-param deployRbac bool = true
+
+@description('Object ID of the deployer (for Key Vault access policy). Get with: az ad signed-in-user show --query id -o tsv')
+param deployerObjectId string = ''
 
 @description('ACR admin password (used when managed identity lacks AcrPull role)')
 @secure()
@@ -74,21 +75,44 @@ resource managedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-
   location: location
 }
 
-// ── Key Vault (for secret storage with key-release policy) ──────
+// ── Key Vault (for envelope key with key-release policy) ──────
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: keyVaultName
   location: location
   properties: {
     sku: {
       family: 'A'
-      name: 'premium' // Required for HSM-backed keys and Secure Key Release (SKR) policies
+      name: 'premium' // Required for HSM-backed keys and Secure Key Release (SKR)
     }
     tenantId: subscription().tenantId
-    enableRbacAuthorization: true
+    // Use access policies (works with Contributor role; RBAC requires Owner/UAA)
+    enableRbacAuthorization: false
     enableSoftDelete: true
     softDeleteRetentionInDays: 7
+    accessPolicies: concat(
+      // Managed identity: needs key release permission for SKR sidecar
+      [
+        {
+          tenantId: subscription().tenantId
+          objectId: managedIdentity.properties.principalId
+          permissions: {
+            keys: [ 'get', 'release' ]
+          }
+        }
+      ],
+      // Deployer: needs key create/get/list to provision envelope key
+      deployerObjectId != '' ? [
+        {
+          tenantId: subscription().tenantId
+          objectId: deployerObjectId
+          permissions: {
+            keys: [ 'get', 'list', 'create', 'import', 'update' ]
+          }
+        }
+      ] : []
+    )
     networkAcls: {
-      defaultAction: 'Deny'
+      defaultAction: 'Allow' // Allow access from deployer's workstation
       bypass: 'AzureServices'
     }
   }
@@ -105,20 +129,8 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
 //     --kty RSA-HSM --size 4096 --exportable true \
 //     --policy @infra/key-release-policy.json
 
-// ── RBAC: Grant the managed identity access to Key Vault key release ─
-// Role: Key Vault Crypto Service Release User (08bbd89a-735e-4713-a852-15bf7196a6c7)
-resource kvRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployRbac) {
-  name: guid(keyVault.id, managedIdentity.id, '08bbd89a-735e-4713-a852-15bf7196a6c7')
-  scope: keyVault
-  properties: {
-    roleDefinitionId: subscriptionResourceId(
-      'Microsoft.Authorization/roleDefinitions',
-      '08bbd89a-735e-4713-a852-15bf7196a6c7'
-    )
-    principalId: managedIdentity.properties.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
+// ── Key Vault access is managed via access policies above ──────
+// (RBAC role assignments not needed — access policies work with Contributor)
 
 // ── ACI Confidential Container Group ────────────────────────────
 resource containerGroup 'Microsoft.ContainerInstance/containerGroups@2023-05-01' = {
