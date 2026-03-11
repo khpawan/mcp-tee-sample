@@ -36,11 +36,38 @@ param location string = resourceGroup().location
 @description('Name prefix for all resources')
 param namePrefix string = 'mcp-tee'
 
+
+@description('Object ID of the deployer (for Key Vault access policy). Get with: az ad signed-in-user show --query id -o tsv')
+param deployerObjectId string = ''
+
+@description('ACR admin password (used when managed identity lacks AcrPull role)')
+@secure()
+param acrPassword string = ''
+
+@description('MAA (Microsoft Azure Attestation) endpoint for the SKR sidecar')
+param maaEndpoint string = 'sharedeus.eus.attest.azure.net'
+
+@description('Name of the RSA-HSM envelope key in Key Vault (used by SKR to decrypt secrets)')
+param envelopeKeyName string = 'mcp-envelope-key'
+
+@description('RSA-encrypted GitHub token (base64). Encrypt with: python scripts/encrypt_secret.py')
+@secure()
+param encGithubToken string = ''
+
+@description('RSA-encrypted database connection string (base64)')
+@secure()
+param encDbConnectionString string = ''
+
+@description('RSA-encrypted webhook URL (base64)')
+@secure()
+param encWebhookUrl string = ''
+
 // ── Variables ───────────────────────────────────────────────────
 var containerGroupName = '${namePrefix}-server'
 var keyVaultName = '${namePrefix}-kv-${uniqueString(resourceGroup().id)}'
 var managedIdentityName = '${namePrefix}-identity'
 var imageName = '${acrName}.azurecr.io/mcp-tee-server:${imageTag}'
+var skrImage = 'mcr.microsoft.com/aci/skr:2.9'
 
 // ── Managed Identity ────────────────────────────────────────────
 resource managedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
@@ -48,72 +75,62 @@ resource managedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-
   location: location
 }
 
-// ── Key Vault (for secret storage with key-release policy) ──────
+// ── Key Vault (for envelope key with key-release policy) ──────
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: keyVaultName
   location: location
   properties: {
     sku: {
       family: 'A'
-      name: 'premium' // Required for HSM-backed keys and Secure Key Release (SKR) policies
+      name: 'premium' // Required for HSM-backed keys and Secure Key Release (SKR)
     }
     tenantId: subscription().tenantId
-    enableRbacAuthorization: true
+    // Use access policies (works with Contributor role; RBAC requires Owner/UAA)
+    enableRbacAuthorization: false
     enableSoftDelete: true
     softDeleteRetentionInDays: 7
+    accessPolicies: concat(
+      // Managed identity: needs key release permission for SKR sidecar
+      [
+        {
+          tenantId: subscription().tenantId
+          objectId: managedIdentity.properties.principalId
+          permissions: {
+            keys: [ 'get', 'release' ]
+          }
+        }
+      ],
+      // Deployer: needs key create/get/list to provision envelope key
+      deployerObjectId != '' ? [
+        {
+          tenantId: subscription().tenantId
+          objectId: deployerObjectId
+          permissions: {
+            keys: [ 'get', 'list', 'create', 'import', 'update', 'encrypt', 'wrapKey' ]
+          }
+        }
+      ] : []
+    )
     networkAcls: {
-      defaultAction: 'Deny'
+      defaultAction: 'Deny' // Deny by default; deployer should add their IP or use az CLI (which uses AzureServices bypass)
       bypass: 'AzureServices'
     }
   }
 }
 
-// ── Key Vault Secrets ───────────────────────────────────────────
-// In production, these are populated by your CI/CD pipeline or
-// a separate secure provisioning step. The key-release policy
-// ensures they can ONLY be read by attested confidential containers.
+// ── Key Vault Keys ───────────────────────────────────────────
+// A single RSA-HSM key (the "envelope key") is used for envelope encryption.
+// Secrets are encrypted with its public key at provisioning time and passed
+// as ENC_* env vars. At runtime, the SKR sidecar releases the private key
+// (after hardware attestation) and the server decrypts them in memory.
+//
+// Create the key AFTER deployment:
+//   az keyvault key create --vault-name <kv> --name mcp-envelope-key \
+//     --kty RSA-HSM --size 4096 --exportable true \
+//     --policy @infra/key-release-policy.json
 
-resource githubTokenSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
-  parent: keyVault
-  name: 'github-token'
-  properties: {
-    value: '' // Populated externally — never in source control
-    contentType: 'text/plain'
-  }
-}
-
-resource dbConnectionSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
-  parent: keyVault
-  name: 'db-connection-string'
-  properties: {
-    value: '' // Populated externally
-    contentType: 'text/plain'
-  }
-}
-
-resource webhookUrlSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
-  parent: keyVault
-  name: 'webhook-url'
-  properties: {
-    value: '' // Populated externally
-    contentType: 'text/plain'
-  }
-}
-
-// ── RBAC: Grant the managed identity access to Key Vault secrets ─
-// Role: Key Vault Secrets User (4633458b-17de-408a-b874-0445c86b69e6)
-resource kvRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(keyVault.id, managedIdentity.id, '4633458b-17de-408a-b874-0445c86b69e6')
-  scope: keyVault
-  properties: {
-    roleDefinitionId: subscriptionResourceId(
-      'Microsoft.Authorization/roleDefinitions',
-      '4633458b-17de-408a-b874-0445c86b69e6'
-    )
-    principalId: managedIdentity.properties.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
+// ── Key Vault access is managed via access policies above ──────
+// (RBAC role assignments not needed — access policies work with Contributor)
 
 // ── ACI Confidential Container Group ────────────────────────────
 resource containerGroup 'Microsoft.ContainerInstance/containerGroups@2023-05-01' = {
@@ -147,25 +164,38 @@ resource containerGroup 'Microsoft.ContainerInstance/containerGroups@2023-05-01'
               memoryInGB: 2
             }
           }
-          // Secrets injected as environment variables by the
-          // attestation sidecar AFTER successful attestation.
-          // These are placeholders — the sidecar overwrites them.
           environmentVariables: [
             {
-              name: 'GITHUB_TOKEN'
-              secureValue: '' // Injected by sidecar post-attestation
+              name: 'SKR_ENDPOINT'
+              value: 'http://localhost:9000'
             }
             {
-              name: 'DB_CONNECTION_STRING'
-              secureValue: '' // Injected by sidecar post-attestation
+              name: 'MAA_ENDPOINT'
+              value: maaEndpoint
             }
             {
-              name: 'WEBHOOK_URL'
-              secureValue: '' // Injected by sidecar post-attestation
-            }
-            {
-              name: 'AZURE_KEY_VAULT_URL'
+              name: 'AKV_ENDPOINT'
               value: keyVault.properties.vaultUri
+            }
+            {
+              name: 'ENVELOPE_KEY_NAME'
+              value: envelopeKeyName
+            }
+            {
+              name: 'IDENTITY_CLIENT_ID'
+              value: managedIdentity.properties.clientId
+            }
+            {
+              name: 'ENC_GITHUB_TOKEN'
+              secureValue: encGithubToken
+            }
+            {
+              name: 'ENC_DB_CONNECTION_STRING'
+              secureValue: encDbConnectionString
+            }
+            {
+              name: 'ENC_WEBHOOK_URL'
+              secureValue: encWebhookUrl
             }
           ]
           ports: [
@@ -176,11 +206,35 @@ resource containerGroup 'Microsoft.ContainerInstance/containerGroups@2023-05-01'
           ]
         }
       }
+      {
+        name: 'skr-sidecar'
+        properties: {
+          image: skrImage
+          resources: {
+            requests: {
+              cpu: 1
+              memoryInGB: 1
+            }
+          }
+          command: [
+            '/bin/skr'
+            '-port'
+            '9000'
+          ]
+          ports: [
+            {
+              port: 9000
+              protocol: 'TCP'
+            }
+          ]
+        }
+      }
     ]
 
     // ─── Network: expose the MCP server port ──────────────────
     ipAddress: {
       type: 'Public'
+      dnsNameLabel: containerGroupName
       ports: [
         {
           port: 8080
@@ -191,7 +245,11 @@ resource containerGroup 'Microsoft.ContainerInstance/containerGroups@2023-05-01'
 
     // ─── Image Registry Credentials ───────────────────────────
     imageRegistryCredentials: [
-      {
+      acrPassword != '' ? {
+        server: '${acrName}.azurecr.io'
+        username: acrName
+        password: acrPassword
+      } : {
         server: '${acrName}.azurecr.io'
         identity: managedIdentity.id
       }
