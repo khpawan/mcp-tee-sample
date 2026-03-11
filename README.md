@@ -2,7 +2,7 @@
 
 > **⚠️ Disclaimer — Reference Only**
 >
-> This repository is a **personal project** shared as a companion to an OC3 2025 talk. It is provided "as-is" for **educational and reference purposes only**. It is **not** an official Microsoft product, is **not supported** by Microsoft, and carries **no warranty or SLA** of any kind. Use at your own risk. Opinions expressed here are the author's own and do not represent the views of Microsoft.
+> This repository is a **personal project** shared as a companion to an OC3 2026 talk. It is provided "as-is" for **educational and reference purposes only**. It is **not** an official Microsoft product, is **not supported** by Microsoft, and carries **no warranty or SLA** of any kind. Use at your own risk. Opinions expressed here are the author's own and do not represent the views of Microsoft.
 
 A reference implementation of an [MCP](https://spec.modelcontextprotocol.io/) server running inside a hardware-enforced Trusted Execution Environment (TEE) on Azure Container Instances with AMD SEV-SNP.
 
