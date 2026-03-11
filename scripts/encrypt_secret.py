@@ -50,8 +50,18 @@ def main():
     parser.add_argument(
         "--key-name", default="mcp-envelope-key", help="Envelope key name in Key Vault"
     )
-    parser.add_argument("--secret", required=True, help="Secret value to encrypt")
+    parser.add_argument(
+        "--secret", required=True,
+        help="Secret value to encrypt. Use '-' to read from stdin."
+    )
     args = parser.parse_args()
+
+    # Read secret from stdin if '-' is passed (avoids exposing secrets in process table)
+    if args.secret == "-":
+        args.secret = sys.stdin.read().strip()
+        if not args.secret:
+            print("ERROR: No secret provided on stdin", file=sys.stderr)
+            sys.exit(1)
 
     # Fetch the public key JWK from Key Vault
     try:

@@ -138,7 +138,7 @@ async def _fetch_envelope_key() -> dict | None:
             )
             resp.raise_for_status()
             access_token = resp.json().get("access_token")
-            logger.info("  ✅ Acquired managed identity token for Key Vault (token length: %d)", len(access_token or ""))
+            logger.info("  ✅ Acquired managed identity token for Key Vault")
     except Exception as e:
         logger.warning("  ❌ Failed to acquire managed identity token: %s", e)
 
@@ -240,12 +240,17 @@ def _check_secrets() -> dict[str, bool]:
 
 
 # ── MCP Server ──────────────────────────────────────────────────
-# Allow connections from any host (the server runs behind ACI's public IP/FQDN)
+# DNS rebinding protection — set MCP_ALLOWED_HOSTS to restrict (e.g., "myhost.eastus.azurecontainer.io")
 _allowed_hosts = os.environ.get("MCP_ALLOWED_HOSTS", "*").split(",")
 _transport_security = TransportSecuritySettings(
     enable_dns_rebinding_protection=(_allowed_hosts != ["*"]),
     allowed_hosts=_allowed_hosts if _allowed_hosts != ["*"] else [],
 )
+if _allowed_hosts == ["*"]:
+    logging.getLogger("mcp-tee-server").warning(
+        "MCP_ALLOWED_HOSTS is '*' — DNS rebinding protection disabled. "
+        "Set MCP_ALLOWED_HOSTS to the server FQDN in production."
+    )
 
 mcp = FastMCP(
     "mcp-tee-server",
@@ -462,84 +467,45 @@ async def attestation_status() -> dict[str, Any]:
     }
 
 
-@mcp.tool()
-async def debug_skr_status() -> dict[str, Any]:
-    """
-    Diagnostic tool: probe the SKR sidecar and report detailed status.
-    Useful for troubleshooting attestation and key release issues.
-    """
-    result: dict[str, Any] = {
-        "skr_endpoint": SKR_ENDPOINT,
-        "maa_endpoint": MAA_ENDPOINT,
-        "akv_endpoint": AKV_ENDPOINT,
-        "envelope_key": ENVELOPE_KEY_NAME,
-    }
+if os.environ.get("ENABLE_DEBUG_TOOLS", "").lower() in ("1", "true", "yes"):
+    @mcp.tool()
+    async def debug_skr_status() -> dict[str, Any]:
+        """
+        Diagnostic tool: probe the SKR sidecar and report status.
+        Only available when ENABLE_DEBUG_TOOLS=true.
+        Does NOT trigger key release — only checks sidecar health and IMDS connectivity.
+        """
+        result: dict[str, Any] = {}
 
-    # Check ENC_* env var presence (not values)
-    for name, enc_name in _ENCRYPTED_ENV_MAP.items():
-        val = os.environ.get(enc_name, "")
-        result[f"env_{enc_name}"] = f"present ({len(val)} chars)" if val else "EMPTY"
+        # Check ENC_* env var presence (not values, not sizes)
+        for name, enc_name in _ENCRYPTED_ENV_MAP.items():
+            val = os.environ.get(enc_name, "")
+            result[f"env_{enc_name}"] = "present" if val else "EMPTY"
 
-    # Check SKR sidecar health
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(f"{SKR_ENDPOINT}/status")
-            result["skr_status"] = {"code": resp.status_code, "body": resp.text[:200]}
-    except Exception as e:
-        result["skr_status"] = {"error": str(e)}
+        # Check SKR sidecar health
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.get(f"{SKR_ENDPOINT}/status")
+                result["skr_status"] = {"code": resp.status_code, "healthy": resp.status_code == 200}
+        except Exception as e:
+            result["skr_status"] = {"error": str(e)}
 
-    # Try IMDS token
-    identity_client_id = os.environ.get("IDENTITY_CLIENT_ID", "")
-    result["identity_client_id"] = identity_client_id or "not set"
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            params = {"api-version": "2018-02-01", "resource": "https://vault.azure.net"}
-            if identity_client_id:
-                params["client_id"] = identity_client_id
-            resp = await client.get(
-                "http://169.254.169.254/metadata/identity/oauth2/token",
-                params=params, headers={"Metadata": "true"},
-            )
-            result["imds_token"] = {"code": resp.status_code, "has_token": "access_token" in resp.text}
-    except Exception as e:
-        result["imds_token"] = {"error": str(e)}
+        # Check IMDS connectivity (does NOT acquire or log token)
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                identity_client_id = os.environ.get("IDENTITY_CLIENT_ID", "")
+                params = {"api-version": "2018-02-01", "resource": "https://vault.azure.net"}
+                if identity_client_id:
+                    params["client_id"] = identity_client_id
+                resp = await client.get(
+                    "http://169.254.169.254/metadata/identity/oauth2/token",
+                    params=params, headers={"Metadata": "true"},
+                )
+                result["imds_reachable"] = resp.status_code == 200
+        except Exception as e:
+            result["imds_reachable"] = False
 
-    # Try SKR key release
-    try:
-        access_token = None
-        async with httpx.AsyncClient(timeout=10) as client:
-            params = {"api-version": "2018-02-01", "resource": "https://vault.azure.net"}
-            if identity_client_id:
-                params["client_id"] = identity_client_id
-            resp = await client.get(
-                "http://169.254.169.254/metadata/identity/oauth2/token",
-                params=params, headers={"Metadata": "true"},
-            )
-            if resp.status_code == 200:
-                access_token = resp.json().get("access_token")
-
-        async with httpx.AsyncClient(timeout=30) as client:
-            akv_host = AKV_ENDPOINT.rstrip("/").replace("https://", "").replace("http://", "")
-            payload = {
-                "maa_endpoint": MAA_ENDPOINT,
-                "akv_endpoint": akv_host,
-                "kid": ENVELOPE_KEY_NAME,
-            }
-            if access_token:
-                payload["access_token"] = access_token
-            resp = await client.post(f"{SKR_ENDPOINT}/key/release", json=payload)
-            if resp.status_code == 200:
-                data = resp.json()
-                key = data.get("key")
-                if isinstance(key, str):
-                    key = json.loads(key)
-                result["key_release"] = {"code": 200, "key_type": key.get("kty") if key else "unknown"}
-            else:
-                result["key_release"] = {"code": resp.status_code, "body": resp.text[:500]}
-    except Exception as e:
-        result["key_release"] = {"error": str(e)}
-
-    return result
+        return result
 
 
 # ── Entry Point ─────────────────────────────────────────────────

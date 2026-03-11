@@ -98,7 +98,12 @@ echo "✓ Policy hash: ${POLICY_HASH}"
 POLICY_FILE="infra/key-release-policy.json"
 if [[ -f "${POLICY_FILE}" ]]; then
   # Update the hostdata hash (replace any existing hex hash or the placeholder)
-  sed -i -E "s/\"equals\": \"[a-f0-9]{64}\"/\"equals\": \"${POLICY_HASH}\"/" "${POLICY_FILE}"
+  # Update the hash (portable across macOS and Linux)
+  if [[ "$(uname)" == "Darwin" ]]; then
+    sed -i '' -E "s/\"equals\": \"([a-f0-9]{64}|<REPLACE_WITH_CCE_POLICY_HASH>)\"/\"equals\": \"${POLICY_HASH}\"/" "${POLICY_FILE}"
+  else
+    sed -i -E "s/\"equals\": \"([a-f0-9]{64}|<REPLACE_WITH_CCE_POLICY_HASH>)\"/\"equals\": \"${POLICY_HASH}\"/" "${POLICY_FILE}"
+  fi
   echo "✓ Updated ${POLICY_FILE} with policy hash"
 fi
 
@@ -156,21 +161,21 @@ if [[ "${PROVISION_SECRETS}" == "true" ]]; then
   ENC_WEBHOOK=""
 
   if [[ -n "${GITHUB_TOKEN}" ]]; then
-    ENC_GITHUB_TOKEN=$(python3 scripts/encrypt_secret.py \
+    ENC_GITHUB_TOKEN=$(echo -n "${GITHUB_TOKEN}" | python3 scripts/encrypt_secret.py \
       --vault-name "${KV_NAME}" --key-name "${ENVELOPE_KEY_NAME}" \
-      --secret "${GITHUB_TOKEN}")
+      --secret -)
     echo "  ✓ Encrypted GITHUB_TOKEN"
   fi
   if [[ -n "${DB_CONN}" ]]; then
-    ENC_DB_CONN=$(python3 scripts/encrypt_secret.py \
+    ENC_DB_CONN=$(echo -n "${DB_CONN}" | python3 scripts/encrypt_secret.py \
       --vault-name "${KV_NAME}" --key-name "${ENVELOPE_KEY_NAME}" \
-      --secret "${DB_CONN}")
+      --secret -)
     echo "  ✓ Encrypted DB_CONNECTION_STRING"
   fi
   if [[ -n "${WEBHOOK}" ]]; then
-    ENC_WEBHOOK=$(python3 scripts/encrypt_secret.py \
+    ENC_WEBHOOK=$(echo -n "${WEBHOOK}" | python3 scripts/encrypt_secret.py \
       --vault-name "${KV_NAME}" --key-name "${ENVELOPE_KEY_NAME}" \
-      --secret "${WEBHOOK}")
+      --secret -)
     echo "  ✓ Encrypted WEBHOOK_URL"
   fi
 

@@ -106,13 +106,13 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
           tenantId: subscription().tenantId
           objectId: deployerObjectId
           permissions: {
-            keys: [ 'get', 'list', 'create', 'import', 'update', 'delete', 'purge', 'encrypt', 'wrapKey', 'release' ]
+            keys: [ 'get', 'list', 'create', 'import', 'update', 'encrypt', 'wrapKey' ]
           }
         }
       ] : []
     )
     networkAcls: {
-      defaultAction: 'Allow' // Allow access from deployer's workstation
+      defaultAction: 'Deny' // Deny by default; deployer should add their IP or use az CLI (which uses AzureServices bypass)
       bypass: 'AzureServices'
     }
   }
